@@ -57,7 +57,7 @@
             android:id="@+id/editModel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Модель"
+            android:hint="Модель (можно несколько через запятую)"
             android:inputType="text"
             android:textColor="#FFFFFF"
             android:textColorHint="#6688AA"

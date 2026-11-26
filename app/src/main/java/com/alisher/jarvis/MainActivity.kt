@@ -194,10 +194,41 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }.start()
     }
 
+    private class ApiError(val code: Int, msg: String) : Exception(msg)
+
+    // Пробует модели по очереди (через запятую в поле «Модель»),
+    // при перегрузке/обрыве — повторяет с паузой.
     private fun askLlm(key: String): String {
         val url = prefs.getString("url", DEFAULT_URL) ?: DEFAULT_URL
-        val model = prefs.getString("model", DEFAULT_MODEL) ?: DEFAULT_MODEL
+        val models = (prefs.getString("model", DEFAULT_MODEL) ?: DEFAULT_MODEL)
+            .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            .ifEmpty { listOf(DEFAULT_MODEL) }
 
+        var lastError = "неизвестная ошибка"
+        for (model in models) {
+            for (attempt in 1..3) {
+                try {
+                    if (attempt > 1 || model != models.first())
+                        setStatus("Повтор… ($model, попытка $attempt)")
+                    return callModel(url, key, model)
+                } catch (e: ApiError) {
+                    lastError = e.message ?: "код ${e.code}"
+                    when (e.code) {
+                        429, 500, 502, 503, 504 -> Thread.sleep(2000L * attempt)  // перегрузка — ждём и повторяем
+                        404, 400 -> break                                       // модели нет — следующая модель
+                        401, 403 -> throw Exception("ключ не подходит: $lastError")
+                        else -> break
+                    }
+                } catch (e: java.io.IOException) {
+                    lastError = "обрыв связи (проверьте VPN)"
+                    Thread.sleep(1500L * attempt)
+                }
+            }
+        }
+        throw Exception(lastError)
+    }
+
+    private fun callModel(url: String, key: String, model: String): String {
         val messages = JSONArray().put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
         synchronized(history) { history.forEach { messages.put(it) } }
         val body = JSONObject()
@@ -219,12 +250,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val resp = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
         conn.disconnect()
-        if (code !in 200..299) throw Exception("код $code ${resp.take(200)}")
+        if (code !in 200..299) throw ApiError(code, "код $code: ${shortError(resp)}")
 
         val content = JSONObject(resp).getJSONArray("choices")
             .getJSONObject(0).getJSONObject("message").getString("content").trim()
         history.add(JSONObject().put("role", "assistant").put("content", content))
         return content
+    }
+
+    // Достаёт из ответа сервера только текст ошибки, без лишних скобок
+    private fun shortError(resp: String): String {
+        return try {
+            val t = resp.trim()
+            val obj = if (t.startsWith("[")) JSONArray(t).getJSONObject(0) else JSONObject(t)
+            obj.getJSONObject("error").optString("message", t).take(200)
+        } catch (e: Exception) {
+            resp.take(200)
+        }
     }
 
     // ---------- Интерфейс ----------
